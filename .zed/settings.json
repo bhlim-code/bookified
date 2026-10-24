@@ -1,0 +1,69 @@
+{
+  "formatter": "prettier",
+  "prettier": {
+    "allowed": true
+  },
+  "format_on_save": "on",
+  "file_scan_exclusions": [
+    "**/node_modules",
+    "**/.git",
+    "**/.next",
+    "**/dist",
+    "**/build",
+    "**/print",
+    "**/.DS_Store",
+    "**/.vscode",
+    "next-env.d.ts"
+  ],
+  "languages": {
+    "TypeScript": {
+      "formatter": "prettier",
+      "code_actions_on_format": {
+        "source.fixAll.eslint": true
+        // "source.organizeImports": true
+      }
+    },
+    "TSX": {
+      "formatter": "prettier",
+      "code_actions_on_format": {
+        "source.fixAll.eslint": true
+        // "source.organizeImports": true
+      }
+    },
+    "CSS": {
+      "language_servers": [
+        "tailwindcss-language-server",
+        "!vscode-css-language-server",
+        "..."
+      ]
+    }
+  },
+  "lsp": {
+    "tailwindcss-language-server": {
+      "settings": {
+        "experimental": {
+          "configFile": "app/globals.css"
+        },
+        "tailwindCSS": {
+          "lint": {
+            "suggestCanonicalClasses": "warning"
+          }
+        }
+      }
+    },
+    "vtsls": {
+      "settings": {
+        "typescript": {
+          "preferences": {
+            "importModuleSpecifier": "non-relative"
+          }
+        },
+        "javascript": {
+          "preferences": {
+            "importModuleSpecifier": "non-relative"
+          }
+        }
+      }
+    }
+  }
+}

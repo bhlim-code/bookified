@@ -1,13 +1,16 @@
+import 'server-only';
+
 import { auth } from '@clerk/nextjs/server';
 
-import type { PlanType } from '@/lib/subscription-constants';
 import { PLANS, PLAN_LIMITS } from '@/lib/subscription-constants';
+import type { PlanType } from '@/lib/subscription-constants';
 
 export const getUserPlan = async (): Promise<PlanType> => {
   const { has, userId } = await auth();
 
   if (!userId) return PLANS.FREE;
 
+  // Check the highest plan first
   if (has({ plan: 'pro' })) return PLANS.PRO;
   if (has({ plan: 'standard' })) return PLANS.STANDARD;
 

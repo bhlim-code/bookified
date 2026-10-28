@@ -5,7 +5,7 @@ import type { Control, FieldPath, FieldValues } from 'react-hook-form';
 import type z from 'zod';
 
 import type { PlanType } from '@/lib/subscription-constants';
-import { PLANS } from '@/lib/subscription-constants';
+// import { PLANS } from '@/lib/subscription-constants';
 import type { UploadSchema } from '@/lib/zod';
 
 // ============================================
@@ -13,7 +13,7 @@ import type { UploadSchema } from '@/lib/zod';
 // ============================================
 
 export interface IBook extends Document {
-  _id: string;
+  // _id: string;
   clerkId: string;
   title: string;
   slug: string;
@@ -41,7 +41,7 @@ export interface IBookSegment extends Document {
 }
 
 export interface IVoiceSession extends Document {
-  _id: string;
+  // _id: string;
   clerkId: string;
   bookId: Types.ObjectId;
   startedAt: Date;

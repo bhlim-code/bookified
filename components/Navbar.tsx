@@ -20,7 +20,14 @@ const Navbar = () => {
     <header className='fixed z-50 w-full bg-(--bg-primary)'>
       <div className='wrapper navbar-height flex items-center justify-between py-4'>
         <Link href='/' className='flex items-center gap-0.5'>
-          <Image src='/assets/logo.png' alt='Bookfied' width={42} height={26} />
+          {/* File is 86x52 (2x of the 42px display size); preflight sets height:auto */}
+          <Image
+            src='/assets/logo.png'
+            alt='Bookified'
+            width={86}
+            height={52}
+            style={{ width: 42, height: 'auto' }}
+          />
           <span className='logo-text'>Bookified</span>
         </Link>
 

@@ -90,9 +90,10 @@ export const sampleBooks = [
 export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 export const ACCEPTED_PDF_TYPES = ['application/pdf'];
 export const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+// 'image/jpg' is not a real MIME type; browsers report JPEG files as 'image/jpeg'
 export const ACCEPTED_IMAGE_TYPES = [
   'image/jpeg',
-  'image/jpg',
+  // 'image/jpg',
   'image/png',
   'image/webp',
 ];
@@ -139,7 +140,9 @@ export const voiceCategories = {
 };
 
 // Default voice
-export const DEFAULT_VOICE = 'rachel';
+// export const DEFAULT_VOICE = 'rachel';
+// Default voice (the compiler checks that it is a real key of voiceOptions)
+export const DEFAULT_VOICE = 'rachel' satisfies keyof typeof voiceOptions;
 
 // ElevenLabs voice settings optimized for conversational AI
 export const VOICE_SETTINGS = {
@@ -176,18 +179,19 @@ export const VAPI_DASHBOARD_CONFIG = {
 
 // Clerk appearance overrides - Warm Literary Style
 // Note: Tailwind requires static class names at build time, so we hardcode color values here
+// The important modifier is written as a trailing "!" (Tailwind v4 syntax)
 export const CLERK_AUTH_APPEARANCE_OVERRIDE = {
   rootBox: 'mx-auto',
   card: 'shadow-none border-none rounded-xl bg-transparent',
-  headerTitle: '!text-2xl font-bold text-[#212a3b]',
-  headerSubtitle: '!mt-3 !text-sm text-[#3d485e]',
+  headerTitle: 'text-2xl! font-bold text-[#212a3b]',
+  headerSubtitle: 'mt-3! text-sm! text-[#3d485e]',
   socialButtonsBlockButton:
-    '!border border-[rgba(33,42,59,0.12)] hover:bg-[#212a3b]/10 transition-all h-12 text-lg !rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.08)]',
-  socialButtonsBlockButtonText: 'font-medium !text-[#212a3b] !text-lg',
+    'border! border-[rgba(33,42,59,0.12)] hover:bg-[#212a3b]/10 transition-all h-12 text-lg rounded-xl! shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.08)]',
+  socialButtonsBlockButtonText: 'font-medium text-[#212a3b]! text-lg!',
   formButtonPrimary:
-    'bg-[#212a3b] hover:bg-[#3d485e] text-white font-medium !border-0 shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.08)] normal-case !h-12 !text-lg !rounded-xl',
+    'bg-[#212a3b] hover:bg-[#3d485e] text-white font-medium border-0! shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.08)] normal-case h-12! text-lg! rounded-xl!',
   formFieldInput:
-    '!border !border-[rgba(33,42,59,0.12)] !rounded-xl focus:ring-[#212a3b] focus:border-[#212a3b] !h-12 !min-h-12 !text-lg !bg-white shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.06)]',
+    'border! border-[rgba(33,42,59,0.12)]! rounded-xl! focus:ring-[#212a3b] focus:border-[#212a3b] h-12! min-h-12! text-lg! bg-white! shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.06)]',
   formFieldLabel: 'text-[#212a3b] font-medium text-lg',
   footerActionLink: 'text-[#212a3b] hover:text-[#3d485e] text-base font-medium',
 };

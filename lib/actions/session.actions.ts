@@ -1,34 +1,56 @@
 'use server';
 
-import type { EndSessionResult, StartSessionResult } from '@/types';
+import { auth } from '@clerk/nextjs/server';
+import mongoose from 'mongoose';
+import { revalidatePath } from 'next/cache';
 
+import Book from '@/database/models/book.model';
 import VoiceSession from '@/database/models/voice-session.model';
 import { connectToDatabase } from '@/database/mongoose';
-import { getCurrentBillingPeriodStart } from '@/lib/subscription-constants';
+import {
+  PLAN_LIMITS,
+  getCurrentBillingPeriodStart,
+} from '@/lib/subscription-constants';
+import { getUserPlan } from '@/lib/subscription.server';
+import type { EndSessionResult, StartSessionResult } from '@/types';
 
 export const startVoiceSession = async (
   clerkId: string,
   bookId: string
 ): Promise<StartSessionResult> => {
   try {
+    // The user comes from the server session. A clerkId sent by the browser
+    // is only accepted when it matches: otherwise anyone could pass a fresh
+    // id to start sessions with a zero count and skip the monthly limit.
+    const { userId } = await auth();
+
+    if (!userId || userId !== clerkId) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    if (!mongoose.isValidObjectId(bookId)) {
+      return { success: false, error: 'Invalid book.' };
+    }
+
     await connectToDatabase();
 
-    // Limits/Plan to see whether a session is allowed.
-    const { getUserPlan } = await import('@/lib/subscription.server');
-    const { PLAN_LIMITS, getCurrentBillingPeriodStart } =
-      await import('@/lib/subscription-constants');
+    const bookExists = await Book.exists({ _id: bookId });
 
+    if (!bookExists) {
+      return { success: false, error: 'Book not found.' };
+    }
+
+    // Limits/Plan to see whether a session is allowed.
     const plan = await getUserPlan();
     const limits = PLAN_LIMITS[plan];
     const billingPeriodStart = getCurrentBillingPeriodStart();
 
     const sessionCount = await VoiceSession.countDocuments({
-      clerkId,
+      clerkId: userId,
       billingPeriodStart,
     });
 
     if (sessionCount >= limits.maxSessionsPerMonth) {
-      const { revalidatePath } = await import('next/cache');
       revalidatePath('/');
 
       return {
@@ -39,7 +61,7 @@ export const startVoiceSession = async (
     }
 
     const session = await VoiceSession.create({
-      clerkId,
+      clerkId: userId,
       bookId,
       startedAt: new Date(),
       billingPeriodStart,
@@ -65,14 +87,40 @@ export const endVoiceSession = async (
   durationSeconds: number
 ): Promise<EndSessionResult> => {
   try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    if (!mongoose.isValidObjectId(sessionId)) {
+      return { success: false, error: 'Voice session not found.' };
+    }
+
     await connectToDatabase();
 
-    const result = await VoiceSession.findByIdAndUpdate(sessionId, {
-      endedAt: new Date(),
-      durationSeconds,
+    // Only the owner can end a session
+    const session = await VoiceSession.findOne({
+      _id: sessionId,
+      clerkId: userId,
     });
 
-    if (!result) return { success: false, error: 'Voice session not found.' };
+    if (!session) return { success: false, error: 'Voice session not found.' };
+
+    // Already ended: do nothing, so the duration cannot be rewritten later
+    if (session.endedAt) return { success: true };
+
+    // The duration is measured by the browser, so it cannot be trusted:
+    // never accept more time than has really passed since the session started
+    const elapsedSeconds = Math.max(
+      0,
+      Math.floor((Date.now() - session.startedAt.getTime()) / 1000)
+    );
+    const reportedSeconds = Math.max(0, Math.floor(durationSeconds) || 0);
+
+    session.endedAt = new Date();
+    session.durationSeconds = Math.min(reportedSeconds, elapsedSeconds);
+    await session.save();
 
     return { success: true };
   } catch (e) {

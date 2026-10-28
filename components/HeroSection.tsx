@@ -3,7 +3,7 @@ import Link from 'next/link';
 
 const HeroSection = () => {
   return (
-    <section className='wrapper mb-10 md:mb-16'>
+    <section className='mb-10 md:mb-16'>
       <div className='library-hero-card'>
         <div className='library-hero-content'>
           {/* Left Part */}
@@ -25,14 +25,16 @@ const HeroSection = () => {
             </Link>
           </div>
 
-          {/* Center Part - Desktop */}
+          {/* Center Part - Desktop. File is 491x352; style keeps the ratio */}
           <div className='library-hero-illustration-desktop'>
             <Image
               src='/assets/hero-illustration.png'
               alt='Vintage books and a globe'
-              width={400}
-              height={400}
-              className='object-contain'
+              width={491}
+              height={352}
+              loading='eager'
+              style={{ width: '100%', maxWidth: 400, height: 'auto' }}
+              className='mx-auto object-contain'
             />
           </div>
 
@@ -41,9 +43,11 @@ const HeroSection = () => {
             <Image
               src='/assets/hero-illustration.png'
               alt='Vintage books and a globe'
-              width={300}
-              height={300}
-              className='object-contain'
+              width={491}
+              height={352}
+              loading='eager'
+              style={{ width: '100%', maxWidth: 300, height: 'auto' }}
+              className='mx-auto object-contain'
             />
           </div>
 

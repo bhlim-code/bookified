@@ -14,21 +14,13 @@ const BookCard = ({ title, author, coverURL, slug }: BookCardProps) => {
       <article className='book-card'>
         <figure className='book-card-figure'>
           <div className='book-card-cover-wrapper'>
-            {coverURL ? (
-              <Image
-                src={coverURL}
-                alt={title}
-                width={133}
-                height={200}
-                className='book-card-cover'
-              />
-            ) : (
-              <div
-                className='book-card-cover aspect-2/3 bg-(--bg-secondary)'
-                role='img'
-                aria-label={`No cover for ${title}`}
-              />
-            )}
+            <Image
+              src={coverURL}
+              alt={title}
+              width={133}
+              height={200}
+              className='book-card-cover'
+            />
           </div>
 
           <figcaption className='book-card-meta'>

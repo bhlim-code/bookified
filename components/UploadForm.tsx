@@ -71,7 +71,13 @@ const UploadForm = () => {
     try {
       const existsCheck = await checkBookExists(data.title);
 
-      if (existsCheck.exists && existsCheck.book) {
+      // Only redirect if the book is complete. A book with 0 segments is the
+      // leftover of a failed upload, so let the flow below finish it.
+      if (
+        existsCheck.exists &&
+        existsCheck.book &&
+        existsCheck.book.totalSegments > 0
+      ) {
         toast.info('Book with same title already exists.');
         form.reset();
         router.push(`/books/${existsCheck.book.slug}`);
@@ -99,6 +105,7 @@ const UploadForm = () => {
       });
 
       let coverUrl: string;
+      let coverBlobKey: string;
 
       if (data.coverImage) {
         const coverFile = data.coverImage;
@@ -113,6 +120,7 @@ const UploadForm = () => {
           }
         );
         coverUrl = uploadedCoverBlob.url;
+        coverBlobKey = uploadedCoverBlob.pathname;
       } else {
         const response = await fetch(parsedPDF.cover);
         const blob = await response.blob();
@@ -123,6 +131,7 @@ const UploadForm = () => {
           contentType: 'image/png',
         });
         coverUrl = uploadedCoverBlob.url;
+        coverBlobKey = uploadedCoverBlob.pathname;
       }
 
       const book = await createBook({
@@ -133,18 +142,22 @@ const UploadForm = () => {
         fileURL: uploadedPdfBlob.url,
         fileBlobKey: uploadedPdfBlob.pathname,
         coverURL: coverUrl,
+        coverBlobKey,
         fileSize: pdfFile.size,
       });
 
-      if (!book.success) {
-        toast.error((book.error as string) || 'Failed to create book');
+      // Checking data too narrows its type for everything below
+      if (!book.success || !book.data) {
+        toast.error(book.error || 'Failed to create book');
         if (book.isBillingError) {
           router.push('/subscriptions');
         }
         return;
       }
 
-      if (book.alreadyExists) {
+      // Existing and complete: go to it. Existing with 0 segments: fall through
+      // and save the segments now (saveBookSegments clears any leftovers first).
+      if (book.alreadyExists && book.data.totalSegments > 0) {
         toast.info('Book with same title already exists.');
         form.reset();
         router.push(`/books/${book.data.slug}`);
@@ -152,7 +165,7 @@ const UploadForm = () => {
       }
 
       const segments = await saveBookSegments(
-        book.data._id,
+        String(book.data._id),
         userId,
         parsedPDF.content
       );

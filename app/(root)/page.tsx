@@ -1,24 +1,42 @@
+import { connection } from 'next/server';
+import { Suspense } from 'react';
+
 import BookCard from '@/components/BookCard';
 import HeroSection from '@/components/HeroSection';
 
-import { sampleBooks } from '@/lib/constants';
+import { getAllBooks } from '@/lib/actions/book.actions';
+
+const BookGrid = async () => {
+  await connection(); // render at request time, not at prerender
+
+  const bookResults = await getAllBooks();
+  const books = bookResults.success ? (bookResults.data ?? []) : [];
+
+  return (
+    <div className='library-books-grid'>
+      {books.map((book) => (
+        <BookCard
+          key={String(book._id)}
+          title={book.title}
+          author={book.author}
+          coverURL={book.coverURL}
+          slug={book.slug}
+        />
+      ))}
+    </div>
+  );
+};
 
 const Page = () => {
+  // const { query } = await searchParams;
+
   return (
     <main className='wrapper container'>
       <HeroSection />
 
-      <div className='library-books-grid'>
-        {sampleBooks.map((book) => (
-          <BookCard
-            key={book._id}
-            title={book.title}
-            author={book.author}
-            coverURL={book.coverURL}
-            slug={book.slug}
-          />
-        ))}
-      </div>
+      <Suspense fallback={<div className='library-books-grid' />}>
+        <BookGrid />
+      </Suspense>
     </main>
   );
 };

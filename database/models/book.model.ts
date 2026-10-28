@@ -1,4 +1,4 @@
-import { model, Schema, models } from 'mongoose';
+import { model, models, Schema, type Model } from 'mongoose';
 
 import type { IBook } from '@/types';
 
@@ -17,7 +17,8 @@ const BookSchema = new Schema<IBook>(
     persona: { type: String },
     fileURL: { type: String, required: true },
     fileBlobKey: { type: String, required: true },
-    coverURL: { type: String },
+    // The upload form always supplies a cover (uploaded or generated from the PDF)
+    coverURL: { type: String, required: true },
     coverBlobKey: { type: String },
     fileSize: { type: Number, required: true },
     totalSegments: { type: Number, default: 0 },
@@ -25,6 +26,7 @@ const BookSchema = new Schema<IBook>(
   { timestamps: true }
 );
 
-const Book = models.Book || model<IBook>('Book', BookSchema);
+// Reuse the compiled model during hot reloads; the cast keeps it typed
+const Book = (models.Book as Model<IBook>) || model<IBook>('Book', BookSchema);
 
 export default Book;

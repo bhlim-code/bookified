@@ -680,10 +680,20 @@
   .book-card-cover-wrapper {
     @apply relative flex h-51.25 items-center justify-center overflow-hidden rounded-[14px] bg-white md:h-60;
   }
-  .book-card-cover {
+  /*.book-card-cover {
     @apply h-42.5 w-auto rounded-lg object-cover md:h-50;
     box-shadow: var(--shadow-book);
+  }*/
+  .book-card-cover {
+    @apply h-42.5 w-28.25 rounded-lg object-cover md:h-50 md:w-33.25;
+    box-shadow: var(--shadow-book);
   }
+  /*.book-card-cover {
+    @apply h-42.5 w-28.25 rounded-lg object-cover md:h-50 md:w-33.25;
+    box-shadow:
+      var(--shadow-book),
+      0 0 0 1px rgba(33, 42, 59, 0.08);
+  }*/
   .book-card-meta {
     @apply mt-4 flex flex-1 flex-col gap-1 md:mt-5;
   }

@@ -5,6 +5,7 @@ import { DEFAULT_VOICE, voiceOptions } from '@/lib/constants';
 import type { TextSegment } from '@/types';
 
 export function cn(...inputs: ClassValue[]) {
+  // eslint-disable-next-line tailwindcss/no-custom-classname
   return twMerge(clsx(inputs));
 }
 
@@ -16,15 +17,17 @@ export const serializeData = <T>(data: T): T =>
 
 // Auto generate slug
 export function generateSlug(text: string): string {
-  return text
+  const slug = text
+    .trim() // Trim first so a trailing space doesn't hide the extension
     .replace(/\.(pdf|txt|epub|docx?|md)$/i, '') // Remove a known file extension only
     .normalize('NFD') // Split accented letters into base letter + accent
     .replace(/[\u0300-\u036f]/g, '') // Drop the accents (café -> cafe)
-    .toLowerCase() // Convert to lowercase
-    .trim() // Remove whitespace from both ends
-    .replace(/[^\w\s-]/g, '') // Remove special characters (keep letters, numbers, spaces, hyphens)
-    .replace(/[\s_]+/g, '-') // Replace spaces and underscores with hyphens
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '') // Keep letters, numbers, spaces, hyphens
+    .replace(/[\s_]+/g, '-') // Spaces and underscores -> hyphens
     .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
+
+  return slug || 'book'; // Fallback for titles with no Latin characters
 }
 
 // Escape regex special characters so user input is matched literally

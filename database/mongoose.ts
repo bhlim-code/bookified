@@ -58,7 +58,5 @@ export const connectToDatabase = async () => {
     throw e;
   }
 
-  // Never log MONGODB_URI: it contains the password
-  console.warn('Connected to MongoDB');
   return cached.conn;
 };

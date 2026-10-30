@@ -17,8 +17,9 @@ const BookCard = ({ title, author, coverURL, slug }: BookCardProps) => {
             <Image
               src={coverURL}
               alt={title}
-              width={133}
-              height={200}
+              width={266}
+              height={400}
+              sizes='(min-width: 768px) 133px, 113px'
               className='book-card-cover'
             />
           </div>

@@ -2,7 +2,6 @@
 
 import { auth } from '@clerk/nextjs/server';
 import mongoose from 'mongoose';
-import { revalidatePath } from 'next/cache';
 
 import Book from '@/database/models/book.model';
 import VoiceSession from '@/database/models/voice-session.model';
@@ -14,8 +13,11 @@ import {
 import { getUserPlan } from '@/lib/subscription.server';
 import type { EndSessionResult, StartSessionResult } from '@/types';
 
+// A failed start is reported within seconds, so only a session this young can
+// be cancelled. Otherwise a running call could be cancelled to skip the limit.
+const CANCEL_WINDOW_MS = 30_000;
+
 export const startVoiceSession = async (
-  clerkId: string,
   bookId: string
 ): Promise<StartSessionResult> => {
   try {
@@ -24,7 +26,7 @@ export const startVoiceSession = async (
     // id to start sessions with a zero count and skip the monthly limit.
     const { userId } = await auth();
 
-    if (!userId || userId !== clerkId) {
+    if (!userId) {
       return { success: false, error: 'Unauthorized' };
     }
 
@@ -34,7 +36,8 @@ export const startVoiceSession = async (
 
     await connectToDatabase();
 
-    const bookExists = await Book.exists({ _id: bookId });
+    // Books are private to their owner, so the session must be for the caller's own book
+    const bookExists = await Book.exists({ _id: bookId, clerkId: userId });
 
     if (!bookExists) {
       return { success: false, error: 'Book not found.' };
@@ -51,8 +54,6 @@ export const startVoiceSession = async (
     });
 
     if (sessionCount >= limits.maxSessionsPerMonth) {
-      revalidatePath('/');
-
       return {
         success: false,
         error: `You have reached the monthly session limit for your ${plan} plan (${limits.maxSessionsPerMonth}). Please upgrade for more sessions.`,
@@ -128,6 +129,43 @@ export const endVoiceSession = async (
     return {
       success: false,
       error: 'Failed to end voice session. Please try again later.',
+    };
+  }
+};
+
+// Removes a session that never started a call (for example the voice service
+// failed to connect), so a failed start does not count against the monthly
+// limit. Sessions that already ended or ran are kept.
+export const cancelVoiceSession = async (
+  sessionId: string
+): Promise<EndSessionResult> => {
+  try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    if (!mongoose.isValidObjectId(sessionId)) {
+      return { success: false, error: 'Voice session not found.' };
+    }
+
+    await connectToDatabase();
+
+    await VoiceSession.deleteOne({
+      _id: sessionId,
+      clerkId: userId,
+      endedAt: null, // matches a missing field and a null value
+      durationSeconds: 0,
+      startedAt: { $gte: new Date(Date.now() - CANCEL_WINDOW_MS) },
+    });
+
+    return { success: true };
+  } catch (e) {
+    console.error('Error cancelling voice session', e);
+    return {
+      success: false,
+      error: 'Failed to cancel voice session.',
     };
   }
 };

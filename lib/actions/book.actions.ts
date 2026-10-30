@@ -1,6 +1,7 @@
 'use server';
 
 import { auth } from '@clerk/nextjs/server';
+import { del } from '@vercel/blob';
 import mongoose from 'mongoose';
 import { revalidatePath } from 'next/cache';
 
@@ -22,6 +23,23 @@ type SegmentHit = Pick<
   IBookSegment,
   'bookId' | 'content' | 'segmentIndex' | 'pageNumber' | 'wordCount'
 > & { _id: mongoose.Types.ObjectId };
+
+// A blob belongs to a user when it lives in this store under "<userId>/".
+// The upload route only hands out tokens for paths with that prefix, so this
+// stops one user from pointing a book (or a delete) at someone else's files.
+const isOwnedBlobUrl = (value: string, userId: string): boolean => {
+  try {
+    const url = new URL(value);
+
+    return (
+      url.protocol === 'https:' &&
+      url.hostname.endsWith('.public.blob.vercel-storage.com') &&
+      decodeURIComponent(url.pathname).startsWith(`/${userId}/`)
+    );
+  } catch {
+    return false;
+  }
+};
 
 // Errors are logged on the server; the client only gets a generic message,
 // so database details never reach the browser.
@@ -97,6 +115,54 @@ export const checkBookExists = async (title: string) => {
   }
 };
 
+export const checkUploadEligibility = async (title: string) => {
+  try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    if (!title?.trim()) {
+      return { success: false, error: 'Title is required.' };
+    }
+
+    await connectToDatabase();
+
+    const slug = generateSlug(title);
+    const existingBook = await Book.findOne({ clerkId: userId, slug }).lean();
+
+    if (existingBook) {
+      return {
+        success: true,
+        exists: true,
+        book: serializeData(existingBook),
+      };
+    }
+
+    // Check subscription limits before any file upload begins
+    const plan = await getUserPlan();
+    const limits = PLAN_LIMITS[plan];
+    const bookCount = await Book.countDocuments({ clerkId: userId });
+
+    if (bookCount >= limits.maxBooks) {
+      return {
+        success: false,
+        error: `You have reached the maximum number of books allowed for your ${plan} plan (${limits.maxBooks}). Please upgrade to add more books.`,
+        isBillingError: true,
+      };
+    }
+
+    return { success: true, exists: false };
+  } catch (e) {
+    console.error('Error checking upload eligibility', e);
+    return {
+      success: false,
+      error: 'Failed to verify upload eligibility. Please try again later.',
+    };
+  }
+};
+
 export const createBook = async (data: CreateBook) => {
   try {
     // Authenticate first: nothing below should run for anonymous callers
@@ -112,6 +178,14 @@ export const createBook = async (data: CreateBook) => {
 
     if (!(data.fileSize > 0 && data.fileSize <= MAX_FILE_SIZE)) {
       return { success: false, error: 'Invalid file size.' };
+    }
+
+    // The files must be the caller's own uploads (see isOwnedBlobUrl)
+    if (
+      !isOwnedBlobUrl(data.fileURL, userId) ||
+      !isOwnedBlobUrl(data.coverURL ?? '', userId)
+    ) {
+      return { success: false, error: 'Invalid file reference.' };
     }
 
     const slug = generateSlug(data.title);
@@ -315,6 +389,104 @@ export const saveBookSegments = async (
       success: false,
       error: 'Failed to save the book content. Please try again later.',
     };
+  }
+};
+
+// Fallback for a failed upload: removes a book that never got its segments,
+// together with its files. The files to delete come from the database record,
+// never from the caller, so this cannot be used to delete arbitrary blobs.
+export const deleteIncompleteUpload = async (bookId: string) => {
+  try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    if (!mongoose.isValidObjectId(bookId)) {
+      return { success: false, error: 'Invalid book id.' };
+    }
+
+    await connectToDatabase();
+
+    // Verify ownership and ensure it's actually an incomplete book (0 segments)
+    const book = await Book.findOne({ _id: bookId, clerkId: userId });
+
+    if (!book) {
+      return { success: false, error: 'Book not found.' };
+    }
+
+    if (book.totalSegments > 0) {
+      return { success: false, error: 'Cannot delete a fully processed book.' };
+    }
+
+    // 1. Delete any leftover segments, then the book itself
+    await BookSegment.deleteMany({ bookId });
+    await Book.deleteOne({ _id: bookId, clerkId: userId });
+
+    // 2. Delete the files. A failure here must not undo the database cleanup.
+    const urlsToDelete = [book.fileURL, book.coverURL].filter(
+      (url): url is string => Boolean(url) && isOwnedBlobUrl(url, userId)
+    );
+
+    if (urlsToDelete.length > 0) {
+      try {
+        await del(urlsToDelete);
+      } catch (e) {
+        console.error('Could not delete blobs of an incomplete upload', e);
+      }
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      console.warn(`Cleaned up incomplete upload for book ${bookId}`);
+    }
+
+    return { success: true };
+  } catch (e) {
+    console.error('Error cleaning up incomplete upload', e);
+    return { success: false, error: 'Failed to cleanup incomplete upload.' };
+  }
+};
+
+// Fallback for files that were uploaded but never became a book
+// (for example createBook failed). Only the caller's own, unused files go.
+export const deleteOrphanedBlobs = async (urls: string[]) => {
+  try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    if (!Array.isArray(urls) || urls.length === 0 || urls.length > 10) {
+      return { success: false, error: 'Invalid request.' };
+    }
+
+    const ownedUrls = urls.filter((url) => isOwnedBlobUrl(url, userId));
+
+    if (ownedUrls.length === 0) {
+      return { success: false, error: 'Nothing to delete.' };
+    }
+
+    await connectToDatabase();
+
+    // Never delete files that a book still points to
+    const inUse = await Book.exists({
+      clerkId: userId,
+      $or: [{ fileURL: { $in: ownedUrls } }, { coverURL: { $in: ownedUrls } }],
+    });
+
+    if (inUse) {
+      return { success: false, error: 'These files are in use.' };
+    }
+
+    await del(ownedUrls);
+
+    return { success: true };
+  } catch (e) {
+    console.error('Error deleting orphaned blobs', e);
+
+    return { success: false, error: 'Failed to delete uploaded files.' };
   }
 };
 

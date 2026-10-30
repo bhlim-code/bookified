@@ -4,16 +4,44 @@ import { Show, SignInButton, UserButton, useUser } from '@clerk/nextjs';
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { Suspense } from 'react';
 
 import { cn } from '@/lib/utils';
 
 const navItems = [
   { label: 'Library', href: '/' },
   { label: 'Add New', href: '/books/new' },
+  { label: 'Pricing', href: '/subscriptions' },
 ];
 
-const Navbar = () => {
+// Reads the pathname, so it must render inside <Suspense>
+const NavLinks = () => {
   const pathName = usePathname();
+
+  return (
+    <>
+      {navItems.map(({ label, href }) => {
+        const isActive =
+          pathName === href || (href !== '/' && pathName.startsWith(href));
+
+        return (
+          <Link
+            href={href}
+            key={label}
+            className={cn(
+              'nav-link-base',
+              isActive ? 'nav-link-active' : 'text-black hover:opacity-70'
+            )}
+          >
+            {label}
+          </Link>
+        );
+      })}
+    </>
+  );
+};
+
+const Navbar = () => {
   const { user } = useUser();
 
   return (
@@ -32,23 +60,10 @@ const Navbar = () => {
         </Link>
 
         <nav className='flex w-fit items-center gap-7.5'>
-          {navItems.map(({ label, href }) => {
-            const isActive =
-              pathName === href || (href !== '/' && pathName.startsWith(href));
+          <Suspense fallback={null}>
+            <NavLinks />
+          </Suspense>
 
-            return (
-              <Link
-                href={href}
-                key={label}
-                className={cn(
-                  'nav-link-base',
-                  isActive ? 'nav-link-active' : 'text-black hover:opacity-70'
-                )}
-              >
-                {label}
-              </Link>
-            );
-          })}
           <div className='flex items-center gap-7.5'>
             <Show when='signed-out'>
               <SignInButton mode='modal' />

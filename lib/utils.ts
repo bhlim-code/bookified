@@ -101,6 +101,143 @@ export const formatDuration = (seconds: number): string => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
+// Browser only: crops near-white margins from a rendered PDF page, so the
+// cover is just the artwork. Returns the original canvas when there is nothing
+// to trim or the result looks wrong (for example a mostly blank page).
+function trimCanvasMargins(
+  source: HTMLCanvasElement,
+  threshold = 245
+): HTMLCanvasElement {
+  const ctx = source.getContext('2d');
+  if (!ctx) return source;
+
+  const { width, height } = source;
+  const { data } = ctx.getImageData(0, 0, width, height);
+
+  const isContent = (x: number, y: number) => {
+    const i = (y * width + x) * 4;
+    return (
+      data[i + 3] > 0 &&
+      (data[i] < threshold ||
+        data[i + 1] < threshold ||
+        data[i + 2] < threshold)
+    );
+  };
+
+  let top = 0;
+  let bottom = height - 1;
+  let left = 0;
+  let right = width - 1;
+
+  const rowHasContent = (y: number) => {
+    for (let x = 0; x < width; x++) if (isContent(x, y)) return true;
+    return false;
+  };
+  const colHasContent = (x: number) => {
+    for (let y = top; y <= bottom; y++) if (isContent(x, y)) return true;
+    return false;
+  };
+
+  while (top < bottom && !rowHasContent(top)) top++;
+  while (bottom > top && !rowHasContent(bottom)) bottom--;
+  while (left < right && !colHasContent(left)) left++;
+  while (right > left && !colHasContent(right)) right--;
+
+  const newWidth = right - left + 1;
+  const newHeight = bottom - top + 1;
+
+  // Full-bleed artwork has content along all four edges of the box. A cover with
+  // a white background has mostly white edges: there the white is part of the
+  // design, not a page margin, so do not trim it.
+  let edgeContent = 0;
+  for (let x = left; x <= right; x++) {
+    if (isContent(x, top)) edgeContent++;
+    if (isContent(x, bottom)) edgeContent++;
+  }
+  for (let y = top; y <= bottom; y++) {
+    if (isContent(left, y)) edgeContent++;
+    if (isContent(right, y)) edgeContent++;
+  }
+  const edgeTotal = 2 * (newWidth + newHeight);
+
+  if (
+    edgeContent / edgeTotal < 0.5 ||
+    newWidth <= 0 ||
+    newHeight <= 0 ||
+    (newWidth === width && newHeight === height) ||
+    newWidth * newHeight < width * height * 0.5
+  ) {
+    return source;
+  }
+
+  const trimmed = document.createElement('canvas');
+  trimmed.width = newWidth;
+  trimmed.height = newHeight;
+  trimmed
+    .getContext('2d')
+    ?.drawImage(
+      source,
+      left,
+      top,
+      newWidth,
+      newHeight,
+      0,
+      0,
+      newWidth,
+      newHeight
+    );
+
+  return trimmed;
+}
+
+// Browser only: makes the cover exactly the card ratio (2:3 by default) by
+// adding background around it, so it is never stretched or cropped on screen.
+// The background is the colour the artwork has at its corners.
+function padToRatio(
+  source: HTMLCanvasElement,
+  ratio = 2 / 3
+): HTMLCanvasElement {
+  const { width, height } = source;
+  const current = width / height;
+  if (Math.abs(current - ratio) < 0.01) return source;
+
+  const ctx = source.getContext('2d');
+  if (!ctx) return source;
+
+  // Pick the colour that most corners share (falls back to the top-left corner)
+  const corners = [
+    ctx.getImageData(0, 0, 1, 1).data,
+    ctx.getImageData(width - 1, 0, 1, 1).data,
+    ctx.getImageData(0, height - 1, 1, 1).data,
+    ctx.getImageData(width - 1, height - 1, 1, 1).data,
+  ];
+  const close = (a: Uint8ClampedArray, b: Uint8ClampedArray) =>
+    Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) < 40;
+  const background =
+    corners.find((c) => corners.filter((o) => close(c, o)).length >= 2) ??
+    corners[0];
+
+  const targetWidth = current < ratio ? Math.round(height * ratio) : width;
+  const targetHeight = current < ratio ? height : Math.round(width / ratio);
+
+  const padded = document.createElement('canvas');
+  padded.width = targetWidth;
+  padded.height = targetHeight;
+
+  const paddedCtx = padded.getContext('2d');
+  if (!paddedCtx) return source;
+
+  paddedCtx.fillStyle = `rgb(${background[0]}, ${background[1]}, ${background[2]})`;
+  paddedCtx.fillRect(0, 0, targetWidth, targetHeight);
+  paddedCtx.drawImage(
+    source,
+    Math.round((targetWidth - width) / 2),
+    Math.round((targetHeight - height) / 2)
+  );
+
+  return padded;
+}
+
 // Browser only: uses canvas and document. Call it from client components.
 export async function parsePDFFile(file: File) {
   try {
@@ -132,8 +269,11 @@ export async function parsePDFFile(file: File) {
       // Newer pdfjs-dist versions render into the canvas itself
       await firstPage.render({ canvas, viewport }).promise;
 
-      // Convert canvas to data URL
-      const coverDataURL = canvas.toDataURL('image/png');
+      // Crop the white page margin (only for full-bleed artwork), fit the card
+      // ratio without stretching, then convert the canvas to a data URL
+      const coverDataURL = padToRatio(trimCanvasMargins(canvas)).toDataURL(
+        'image/png'
+      );
       firstPage.cleanup();
 
       // Extract text from all pages

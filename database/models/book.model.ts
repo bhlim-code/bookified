@@ -6,10 +6,10 @@ const BookSchema = new Schema<IBook>(
   {
     clerkId: { type: String, required: true },
     title: { type: String, required: true },
+    // Unique per user (see the compound index below), not across all users
     slug: {
       type: String,
       required: true,
-      unique: true,
       lowercase: true,
       trim: true,
     },
@@ -25,6 +25,10 @@ const BookSchema = new Schema<IBook>(
   },
   { timestamps: true }
 );
+
+// Each user can have one book per slug; different users can share a title.
+// Also serves the library list: queries by clerkId.
+BookSchema.index({ clerkId: 1, slug: 1 }, { unique: true });
 
 // Reuse the compiled model during hot reloads; the cast keeps it typed
 const Book = (models.Book as Model<IBook>) || model<IBook>('Book', BookSchema);

@@ -24,9 +24,11 @@ import { Input } from '@/components/ui/input';
 import VoiceSelector from '@/components/VoiceSelector';
 
 import {
-  checkBookExists,
+  checkUploadEligibility,
   createBook,
   saveBookSegments,
+  deleteIncompleteUpload,
+  deleteOrphanedBlobs,
 } from '@/lib/actions/book.actions';
 import { ACCEPTED_PDF_TYPES, ACCEPTED_IMAGE_TYPES } from '@/lib/constants';
 import { generateSlug, parsePDFFile } from '@/lib/utils';
@@ -38,6 +40,8 @@ const emptySubscribe = () => () => {};
 
 const UploadForm = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isBillingError, setIsBillingError] = useState(false);
   // false during server render and hydration, true once mounted on the client
   const isMounted = useSyncExternalStore(
     emptySubscribe,
@@ -65,30 +69,64 @@ const UploadForm = () => {
     }
 
     setIsSubmitting(true);
+    setFormError(null);
+    setIsBillingError(false);
+
+    // What this upload has created so far, so a failure can undo exactly that
+    const uploadedUrls: string[] = [];
+    let createdBookId: string | null = null;
+
+    // FALLBACK: runs whenever the upload fails after files were uploaded.
+    // - a book record exists  -> remove the book, its segments and its files
+    // - only files exist      -> remove the files
+    const rollback = async () => {
+      try {
+        if (createdBookId) {
+          await deleteIncompleteUpload(createdBookId);
+        } else if (uploadedUrls.length > 0) {
+          await deleteOrphanedBlobs(uploadedUrls);
+        }
+      } catch (e) {
+        // Cleanup is best effort: never hide the original error because of it
+        console.error('Rollback failed', e);
+      }
+    };
 
     // PostHog -> Track Book Uploads...
 
     try {
-      const existsCheck = await checkBookExists(data.title);
+      // 1. CHECK ELIGIBILITY & LIMITS FIRST (Prevents orphaned blobs if limits are exceeded)
+      const eligibility = await checkUploadEligibility(data.title);
+
+      if (!eligibility.success) {
+        const errorMsg = eligibility.error || 'Upload check failed.';
+        setFormError(errorMsg);
+        toast.error(errorMsg);
+
+        if (eligibility.isBillingError) {
+          setIsBillingError(true);
+        }
+        return;
+      }
 
       // Only redirect if the book is complete. A book with 0 segments is the
       // leftover of a failed upload, so let the flow below finish it.
-      if (
-        existsCheck.exists &&
-        existsCheck.book &&
-        existsCheck.book.totalSegments > 0
-      ) {
-        toast.info('Book with same title already exists.');
-        form.reset();
-        router.push(`/books/${existsCheck.book.slug}`);
-        return;
+      if (eligibility.exists && eligibility.book) {
+        if (eligibility.book.totalSegments > 0) {
+          toast.info('Book with same title already exists.');
+          form.reset();
+          router.push(`/books/${eligibility.book.slug}`);
+          return;
+        }
+
+        // Leftover of an earlier failed upload (0 segments): remove it and
+        // start again from scratch, so no old files are left behind
+        await deleteIncompleteUpload(String(eligibility.book._id));
       }
 
       // Safe blob name: no slashes or special characters; fallback for titles
       // with no Latin letters (the slug would otherwise be empty)
-      const fileTitle = generateSlug(data.title) || 'book';
       const pdfFile = data.pdfFile;
-
       const parsedPDF = await parsePDFFile(pdfFile);
 
       if (parsedPDF.content.length === 0) {
@@ -98,11 +136,21 @@ const UploadForm = () => {
         return;
       }
 
-      const uploadedPdfBlob = await upload(`${fileTitle}.pdf`, pdfFile, {
-        access: 'public',
-        handleUploadUrl: '/api/upload',
-        contentType: 'application/pdf',
-      });
+      // Safe blob name: no slashes or special characters in the title part.
+      // Files go under "<userId>/", which the upload route requires.
+      const fileTitle = generateSlug(data.title) || 'book';
+
+      // 2. NOW UPLOAD TO VERCEL BLOB (Safe because checks passed)
+      const uploadedPdfBlob = await upload(
+        `${userId}/${fileTitle}.pdf`,
+        pdfFile,
+        {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          contentType: 'application/pdf',
+        }
+      );
+      uploadedUrls.push(uploadedPdfBlob.url);
 
       let coverUrl: string;
       let coverBlobKey: string;
@@ -111,7 +159,7 @@ const UploadForm = () => {
         const coverFile = data.coverImage;
         const coverExt = coverFile.type.split('/')[1] || 'png';
         const uploadedCoverBlob = await upload(
-          `${fileTitle}_cover.${coverExt}`,
+          `${userId}/${fileTitle}_cover.${coverExt}`,
           coverFile,
           {
             access: 'public',
@@ -119,21 +167,27 @@ const UploadForm = () => {
             contentType: coverFile.type,
           }
         );
+        uploadedUrls.push(uploadedCoverBlob.url);
         coverUrl = uploadedCoverBlob.url;
         coverBlobKey = uploadedCoverBlob.pathname;
       } else {
         const response = await fetch(parsedPDF.cover);
         const blob = await response.blob();
 
-        const uploadedCoverBlob = await upload(`${fileTitle}_cover.png`, blob, {
-          access: 'public',
-          handleUploadUrl: '/api/upload',
-          contentType: 'image/png',
-        });
+        const uploadedCoverBlob = await upload(
+          `${userId}/${fileTitle}_cover.png`,
+          blob,
+          {
+            access: 'public',
+            handleUploadUrl: '/api/upload',
+            contentType: 'image/png',
+          }
+        );
         coverUrl = uploadedCoverBlob.url;
         coverBlobKey = uploadedCoverBlob.pathname;
       }
 
+      // 3. CREATE BOOK IN MONGODB
       const book = await createBook({
         clerkId: userId,
         title: data.title,
@@ -148,24 +202,42 @@ const UploadForm = () => {
 
       // Checking data too narrows its type for everything below
       if (!book.success || !book.data) {
-        toast.error(book.error || 'Failed to create book');
+        const errorMsg = book.error || 'Failed to create book';
+        setFormError(errorMsg);
+        toast.error(errorMsg);
         if (book.isBillingError) {
-          router.push('/subscriptions');
+          setIsBillingError(true);
         }
         return;
       }
 
       // Existing and complete: go to it. Existing with 0 segments: fall through
       // and save the segments now (saveBookSegments clears any leftovers first).
-      if (book.alreadyExists && book.data.totalSegments > 0) {
-        toast.info('Book with same title already exists.');
-        form.reset();
-        router.push(`/books/${book.data.slug}`);
+      if (book.alreadyExists) {
+        // The book appeared in the meantime, so the files uploaded above are
+        // not attached to anything: remove them
+        await rollback();
+
+        if (book.data.totalSegments > 0) {
+          toast.info('Book with same title already exists.');
+          form.reset();
+          router.push(`/books/${book.data.slug}`);
+          return;
+        }
+
+        const errorMsg =
+          'This book is still being processed. Please try again in a moment.';
+        setFormError(errorMsg);
+        toast.error(errorMsg);
         return;
       }
 
+      // From here on the book record exists, so a failure removes the record
+      createdBookId = String(book.data._id);
+
+      // 4. SAVE BOOK SEGMENTS
       const segments = await saveBookSegments(
-        String(book.data._id),
+        createdBookId,
         userId,
         parsedPDF.content
       );
@@ -173,16 +245,22 @@ const UploadForm = () => {
       if (!segments.success) {
         // TODO: delete the book created above (and its blobs) here, so a retry
         // doesn't find an existing book that has no segments.
-        toast.error('Failed to save book segments');
+        await rollback();
+        const errorMsg = 'Failed to save book segments. Upload rolled back.';
+        setFormError(errorMsg);
+        toast.error(errorMsg);
         return;
       }
 
       form.reset();
       router.push('/');
     } catch (error) {
+      // Any unexpected failure (network, upload, server action): undo, then report
       console.error(error);
-
-      toast.error('Failed to upload book. Please try again later.');
+      await rollback();
+      const errorMsg = 'Failed to upload book. Please try again later.';
+      setFormError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setIsSubmitting(false);
     }
@@ -281,6 +359,24 @@ const UploadForm = () => {
                 </FormItem>
               )}
             />
+
+            {/* INLINE ERROR BANNER WITH ACTION BUTTON */}
+            {formError && (
+              <div className='space-y-2 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-600'>
+                <p>{formError}</p>
+                {isBillingError && (
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    className='border-red-300 text-red-700 hover:bg-red-100'
+                    onClick={() => router.push('/subscriptions')}
+                  >
+                    Go to Subscriptions & Upgrade
+                  </Button>
+                )}
+              </div>
+            )}
 
             {/* 6. Submit Button */}
             <Button type='submit' className='form-btn' disabled={isSubmitting}>

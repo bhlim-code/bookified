@@ -1015,3 +1015,19 @@ button[data-variant='unstyled'] *,
 /*  transform: translate(-2px, -2px);*/
 /*  box-shadow: 6px 6px 0px 0px rgba(0, 0, 0, 1);*/
 /*}*/
+
+/* Autofill: keep inputs white with the app's dark text */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #212a3b;
+  caret-color: #212a3b;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* Non-Clerk inputs: also cover the tint with a white inset shadow */
+.form-input:-webkit-autofill,
+.form-input:-webkit-autofill:hover,
+.form-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #fff inset;
+}

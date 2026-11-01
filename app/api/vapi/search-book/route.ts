@@ -1,30 +1,60 @@
+import { timingSafeEqual } from 'node:crypto';
+
+import mongoose from 'mongoose';
 import { NextResponse } from 'next/server';
 
 import { searchBookSegments } from '@/lib/actions/book.actions';
 
+const MAX_QUERY_LENGTH = 200;
+const MAX_TOOL_CALLS = 5;
+
+// Vapi sends the shared secret in a header (set it in the tool's server
+// settings). Without it anyone could read any book by posting its id.
+function isAuthorized(request: Request) {
+  const secret = process.env.VAPI_WEBHOOK_SECRET;
+  const received = request.headers.get('x-vapi-secret');
+  if (!secret || !received) return false;
+
+  const a = Buffer.from(secret);
+  const b = Buffer.from(received);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Parse tool arguments that may arrive as a JSON string or an object
+function parseArgs(args: unknown): Record<string, unknown> {
+  if (!args) return {};
+  if (typeof args === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(args);
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof args === 'object' ? (args as Record<string, unknown>) : {};
+}
+
 // Helper function to process book search logic
 async function processBookSearch(bookId: unknown, query: unknown) {
-  // Validate inputs before conversion to prevent null/undefined becoming "null"/"undefined" strings
-  if (bookId == null || query == null || query === '') {
-    return { result: 'Missing bookId or query' };
-  }
-
-  // Convert bookId to string
-  const bookIdStr = String(bookId);
-  const queryStr = String(query).trim();
-
-  // Additional validation after conversion
   if (
-    !bookIdStr ||
-    bookIdStr === 'null' ||
-    bookIdStr === 'undefined' ||
-    !queryStr
+    typeof bookId !== 'string' ||
+    !mongoose.isValidObjectId(bookId) ||
+    typeof query !== 'string'
   ) {
     return { result: 'Missing bookId or query' };
   }
 
+  // Trim the query and cap its length so one request can't trigger a huge
+  // regex search. An empty or whitespace-only query is treated as missing.
+  const queryStr = query.trim().slice(0, MAX_QUERY_LENGTH);
+  if (!queryStr) {
+    return { result: 'Missing bookId or query' };
+  }
+
   // Execute search
-  const searchResult = await searchBookSegments(bookIdStr, queryStr, 3);
+  const searchResult = await searchBookSegments(bookId, queryStr, 3);
 
   // Return results
   if (!searchResult.success || !searchResult.data?.length) {
@@ -32,7 +62,7 @@ async function processBookSearch(bookId: unknown, query: unknown) {
   }
 
   const combinedText = searchResult.data
-    .map((segment) => (segment as { content: string }).content)
+    .map((segment) => segment.content)
     .join('\n\n');
 
   return { result: combinedText };
@@ -42,28 +72,21 @@ export async function GET() {
   return NextResponse.json({ status: 'ok' });
 }
 
-// Parse tool arguments that may arrive as a JSON string or an object
-function parseArgs(args: unknown): Record<string, unknown> {
-  if (!args) return {};
-  if (typeof args === 'string') {
-    try {
-      return JSON.parse(args);
-    } catch {
-      return {};
-    }
-  }
-  return args as Record<string, unknown>;
-}
-
 export async function POST(request: Request) {
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     const body = await request.json();
 
-    console.log('Vapi search-book request:', JSON.stringify(body, null, 2));
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('Vapi search-book:', body?.message?.type);
+    }
 
     // Support multiple Vapi formats
     const functionCall = body?.message?.functionCall;
-    const toolCallList =
+    const toolCallList: unknown =
       body?.message?.toolCallList || body?.message?.toolCalls;
 
     // Handle single functionCall format
@@ -80,7 +103,7 @@ export async function POST(request: Request) {
     }
 
     // Handle toolCallList format (array of calls)
-    if (!toolCallList || toolCallList.length === 0) {
+    if (!Array.isArray(toolCallList) || toolCallList.length === 0) {
       return NextResponse.json({
         results: [{ result: 'No tool calls found' }],
       });
@@ -88,7 +111,7 @@ export async function POST(request: Request) {
 
     const results = [];
 
-    for (const toolCall of toolCallList) {
+    for (const toolCall of toolCallList.slice(0, MAX_TOOL_CALLS)) {
       const { id, function: func } = toolCall;
       const name = func?.name;
       const args = parseArgs(func?.arguments);

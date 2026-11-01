@@ -2,7 +2,7 @@
 
 import { useAuth } from '@clerk/nextjs';
 import Vapi from '@vapi-ai/web';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 
 import { useSubscription } from '@/hooks/useSubscription';
 import {
@@ -13,6 +13,9 @@ import {
 import { ASSISTANT_ID, DEFAULT_VOICE, VOICE_SETTINGS } from '@/lib/constants';
 import { getVoice } from '@/lib/utils';
 import type { IBook, Messages } from '@/types';
+
+// A message with a stable id, so the UI can use it as a React key
+export type ChatMessage = Messages & { id: string };
 
 function useLatestRef<T>(value: T) {
   const ref = useRef(value);
@@ -28,9 +31,68 @@ const VAPI_API_KEY = process.env.NEXT_PUBLIC_VAPI_API_KEY;
 const TIMER_INTERVAL_MS = 1000;
 const SECONDS_PER_MINUTE = 60;
 const DEFAULT_MAX_DURATION_SECONDS = 15 * SECONDS_PER_MINUTE;
+// Show the "time is almost up" warning when this many seconds remain
+const TIME_WARNING_THRESHOLD_SECONDS = 60;
 // Vapi's own cap is a backstop: it ends the call a little after our timer,
 // so the friendly "time limit reached" message normally shows first
 const VAPI_MAX_DURATION_GRACE_SECONDS = 10;
+
+let messageCounter = 0;
+const nextMessageId = () => `m${++messageCounter}`;
+
+// True when an error message looks like a blocked microphone
+const isPermissionMessage = (message: string) =>
+  message.includes('permission') ||
+  message.includes('denied') ||
+  message.includes('notallowed') ||
+  message.includes('not allowed') ||
+  message.includes('microphone');
+
+const MIC_BLOCKED_MESSAGE =
+  'Microphone access is blocked. Please allow the microphone in your browser and try again.';
+
+// Joins two chunks of one spoken turn into a single, clean piece of text
+function joinTranscript(previous: string, next: string) {
+  const a = previous.replace(/\s+/g, ' ').trim();
+  const b = next.replace(/\s+/g, ' ').trim();
+
+  if (!a) return b;
+  if (!b) return a;
+
+  // Exact repeat of what is already shown
+  if (a === b) return a;
+
+  // The new chunk already contains the previous text (a growing sentence),
+  // so use it instead of showing the same words twice
+  if (b.startsWith(a)) return b;
+
+  return `${a} ${b}`;
+}
+
+// Display only: shows the opening message as one bubble per sentence
+// ("Hey, good to meet you." / "Quick question before we dive in." / the
+// question). Later replies stay as single bubbles. A split happens after a
+// period followed by a space, never after "?".
+function splitOpeningMessage(messages: ChatMessage[]): ChatMessage[] {
+  const first = messages[0];
+  if (!first || first.role !== 'assistant') return messages;
+
+  const parts = first.content
+    .split(/(?<=\.)\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length < 2) return messages;
+
+  return [
+    ...parts.map((content, i) => ({
+      ...first,
+      id: `${first.id}-${i}`,
+      content,
+    })),
+    ...messages.slice(1),
+  ];
+}
 
 let vapi: InstanceType<typeof Vapi> | null = null;
 function getVapi() {
@@ -53,7 +115,7 @@ export function useVapi(book: IBook) {
   const { limits } = useSubscription();
 
   const [status, setStatus] = useState<CallStatus>('idle');
-  const [messages, setMessages] = useState<Messages[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentMessage, setCurrentMessage] = useState('');
   const [currentUserMessage, setCurrentUserMessage] = useState('');
   const [duration, setDuration] = useState(0);
@@ -76,6 +138,12 @@ export function useVapi(book: IBook) {
   const maxDurationSeconds = serverMaxSeconds ?? planMaxSeconds;
   const maxDurationRef = useLatestRef(maxDurationSeconds);
   const voice = book.persona || DEFAULT_VOICE;
+
+  // What the UI shows: the merged messages, with the opening split into bubbles
+  const displayMessages = useMemo(
+    () => splitOpeningMessage(messages),
+    [messages]
+  );
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
@@ -141,6 +209,8 @@ export function useVapi(book: IBook) {
           if (newDuration >= maxDurationRef.current && !isStoppingRef.current) {
             isStoppingRef.current = true;
             clearTimer();
+            // Lets the UI offer the upgrade button next to the message
+            setIsBillingError(true);
             setLimitError(
               `Session time limit (${Math.floor(
                 maxDurationRef.current / SECONDS_PER_MINUTE
@@ -211,16 +281,28 @@ export function useVapi(book: IBook) {
           if (message.role === 'user') setCurrentUserMessage('');
 
           setMessages((prev) => {
-            // Only skip an exact repeat of the previous message. Comparing with
-            // the whole history would drop a second "yes" later in the chat.
             const last = prev[prev.length - 1];
-            const isDupe =
-              last?.role === message.role &&
-              last?.content === message.transcript;
 
-            return isDupe
-              ? prev
-              : [...prev, { role: message.role, content: message.transcript }];
+            // Same speaker as the last bubble: Vapi can send one spoken turn
+            // as several final chunks, so continue the bubble instead of
+            // starting a new one
+            if (last?.role === message.role) {
+              const merged = joinTranscript(last.content, message.transcript);
+
+              // Nothing new to show (an exact repeat)
+              if (merged === last.content) return prev;
+
+              return [...prev.slice(0, -1), { ...last, content: merged }];
+            }
+
+            return [
+              ...prev,
+              {
+                id: nextMessageId(),
+                role: message.role as Messages['role'],
+                content: joinTranscript('', message.transcript),
+              },
+            ];
           });
         }
       },
@@ -245,7 +327,9 @@ export function useVapi(book: IBook) {
 
         // Show user-friendly error message
         const errorMessage = String(error?.message ?? '').toLowerCase();
-        if (
+        if (isPermissionMessage(errorMessage)) {
+          setLimitError(MIC_BLOCKED_MESSAGE);
+        } else if (
           errorMessage.includes('timeout') ||
           errorMessage.includes('silence')
         ) {
@@ -274,7 +358,24 @@ export function useVapi(book: IBook) {
       client.on(event as keyof typeof handlers, handler as () => void);
     });
 
+    // Closing the tab or leaving the site does not run the unmount cleanup,
+    // so end the call here too. This is best effort: the request may not
+    // finish, so the server should also expire sessions that never ended.
+    const onPageHide = () => {
+      if (sessionIdRef.current) {
+        try {
+          client.stop();
+        } catch {
+          // Nothing to stop
+        }
+        closeCurrentSession();
+      }
+    };
+    window.addEventListener('pagehide', onPageHide);
+
     return () => {
+      window.removeEventListener('pagehide', onPageHide);
+
       // End active session on unmount
       if (sessionIdRef.current) {
         try {
@@ -337,7 +438,13 @@ export function useVapi(book: IBook) {
           : null
       );
 
-      const firstMessage = `Hey, good to meet you. Quick question before we dive in - have you actually read ${book.title} yet, or are we starting fresh?`;
+      // Each call starts with a clean transcript, so the opening message is
+      // always the first bubble (and the split below applies to it)
+      setMessages([]);
+
+      // Written with sentence punctuation: the opening is shown as one bubble
+      // per sentence (see splitOpeningMessage)
+      const firstMessage = `Hey, good to meet you. Quick question before we dive in. Have you actually read ${book.title} yet? Or are we starting fresh?`;
 
       await client.start(ASSISTANT_ID, {
         // Also enforce the plan limit on Vapi's side, so editing this page in
@@ -370,7 +477,15 @@ export function useVapi(book: IBook) {
       // The call never started: remove the session so it is not counted
       closeCurrentSession();
       setStatus('idle');
-      setLimitError('Failed to start voice session. Please try again.');
+
+      const errorMessage = String(
+        (err as { message?: string })?.message ?? ''
+      ).toLowerCase();
+      setLimitError(
+        isPermissionMessage(errorMessage)
+          ? MIC_BLOCKED_MESSAGE
+          : 'Failed to start voice session. Please try again.'
+      );
     } finally {
       isStartingRef.current = false;
     }
@@ -396,10 +511,17 @@ export function useVapi(book: IBook) {
     status === 'thinking' ||
     status === 'speaking';
 
+  // Time left in the session, and when to warn the user
+  const remainingSeconds = Math.max(0, maxDurationSeconds - duration);
+  const showTimeWarning =
+    isActive &&
+    remainingSeconds > 0 &&
+    remainingSeconds <= TIME_WARNING_THRESHOLD_SECONDS;
+
   return {
     status,
     isActive,
-    messages,
+    messages: displayMessages,
     currentMessage,
     currentUserMessage,
     duration,
@@ -408,6 +530,8 @@ export function useVapi(book: IBook) {
     limitError,
     isBillingError,
     maxDurationSeconds,
+    remainingSeconds,
+    showTimeWarning,
     clearError,
   };
 }

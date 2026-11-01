@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Suspense } from 'react';
 
+import PlanBadge from '@/components/PlanBadge';
+
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -76,6 +78,7 @@ const Navbar = () => {
                     {user.firstName}
                   </Link>
                 )}
+                <PlanBadge />
               </div>
             </Show>
           </div>

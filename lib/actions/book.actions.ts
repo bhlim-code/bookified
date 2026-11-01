@@ -3,7 +3,6 @@
 import { auth } from '@clerk/nextjs/server';
 import { del } from '@vercel/blob';
 import mongoose from 'mongoose';
-import { revalidatePath } from 'next/cache';
 
 import BookSegment from '@/database/models/book-segment.model';
 import Book from '@/database/models/book.model';
@@ -12,17 +11,12 @@ import { MAX_FILE_SIZE } from '@/lib/constants';
 import { PLAN_LIMITS } from '@/lib/subscription-constants';
 import { getUserPlan } from '@/lib/subscription.server';
 import { escapeRegex, generateSlug, serializeData } from '@/lib/utils';
-import type { CreateBook, IBookSegment, TextSegment } from '@/types';
+import type { CreateBook, TextSegment } from '@/types';
 
 // Upper bound for one upload (a ~1000 page book is roughly 1000 segments)
 const MAX_SEGMENTS_PER_BOOK = 20000;
-const MAX_SEARCH_RESULTS = 20;
-
-// Shape of a segment returned by the search queries (only the selected fields)
-type SegmentHit = Pick<
-  IBookSegment,
-  'bookId' | 'content' | 'segmentIndex' | 'pageNumber' | 'wordCount'
-> & { _id: mongoose.Types.ObjectId };
+// Upper bound for the text of one segment (segments are about 500 words)
+const MAX_SEGMENT_TEXT_LENGTH = 20000;
 
 // A blob belongs to a user when it lives in this store under "<userId>/".
 // The upload route only hands out tokens for paths with that prefix, so this
@@ -54,7 +48,6 @@ export const getAllBooks = async (search?: string) => {
 
     await connectToDatabase();
 
-    // let query = {};
     const query: Record<string, unknown> = { clerkId: userId };
 
     if (search) {
@@ -92,7 +85,6 @@ export const checkBookExists = async (title: string) => {
 
     const slug = generateSlug(title);
 
-    // const existingBook = await Book.findOne({ slug }).lean();
     const existingBook = await Book.findOne({ clerkId: userId, slug }).lean();
 
     if (existingBook) {
@@ -190,16 +182,8 @@ export const createBook = async (data: CreateBook) => {
 
     const slug = generateSlug(data.title);
 
-    if (!slug) {
-      return {
-        success: false,
-        error: 'Please use a title with letters or numbers.',
-      };
-    }
-
     await connectToDatabase();
 
-    // const existingBook = await Book.findOne({ slug }).lean();
     const existingBook = await Book.findOne({ clerkId: userId, slug }).lean();
 
     if (existingBook) {
@@ -217,8 +201,6 @@ export const createBook = async (data: CreateBook) => {
     const bookCount = await Book.countDocuments({ clerkId: userId });
 
     if (bookCount >= limits.maxBooks) {
-      revalidatePath('/');
-
       return {
         success: false,
         error: `You have reached the maximum number of books allowed for your ${plan} plan (${limits.maxBooks}). Please upgrade to add more books.`,
@@ -244,9 +226,10 @@ export const createBook = async (data: CreateBook) => {
         totalSegments: 0,
       });
     } catch (e) {
-      // Two uploads of the same title at once: the unique slug index rejects the second
+      // Two uploads of the same title at once: the unique { clerkId, slug } index
+      // rejects the second
       if ((e as { code?: number }).code === 11000) {
-        const existing = await Book.findOne({ slug }).lean();
+        const existing = await Book.findOne({ clerkId: userId, slug }).lean();
 
         if (existing) {
           return {
@@ -283,7 +266,6 @@ export const getBookBySlug = async (slug: string) => {
 
     await connectToDatabase();
 
-    // const book = await Book.findOne({ slug }).lean();
     // Scoped to the owner: other users' books look like they do not exist
     const book = await Book.findOne({ clerkId: userId, slug }).lean();
 
@@ -325,7 +307,15 @@ export const saveBookSegments = async (
     if (
       !Array.isArray(segments) ||
       segments.length === 0 ||
-      segments.length > MAX_SEGMENTS_PER_BOOK
+      segments.length > MAX_SEGMENTS_PER_BOOK ||
+      !segments.every(
+        (segment) =>
+          typeof segment?.text === 'string' &&
+          segment.text.length > 0 &&
+          segment.text.length <= MAX_SEGMENT_TEXT_LENGTH &&
+          Number.isInteger(segment.segmentIndex) &&
+          segment.segmentIndex >= 0
+      )
     ) {
       return { success: false, error: 'Invalid book content.' };
     }
@@ -487,87 +477,5 @@ export const deleteOrphanedBlobs = async (urls: string[]) => {
     console.error('Error deleting orphaned blobs', e);
 
     return { success: false, error: 'Failed to delete uploaded files.' };
-  }
-};
-
-// Searches book segments using MongoDB text search with regex fallback
-export const searchBookSegments = async (
-  bookId: string,
-  query: string,
-  limit: number = 5
-) => {
-  try {
-    if (!mongoose.isValidObjectId(bookId)) {
-      return { success: false, error: 'Invalid book id.', data: [] };
-    }
-
-    const searchText = String(query).slice(0, 200);
-    const maxResults = Math.min(
-      Math.max(Math.floor(limit) || 5, 1),
-      MAX_SEARCH_RESULTS
-    );
-
-    await connectToDatabase();
-
-    if (process.env.NODE_ENV === 'development') {
-      console.warn(`Searching for: "${query}" in book ${bookId}`);
-    }
-
-    const bookObjectId = new mongoose.Types.ObjectId(bookId);
-
-    // Try MongoDB text search first (requires text index)
-    // let segments: Record<string, unknown>[] = [];
-    let segments: SegmentHit[] = [];
-    try {
-      segments = await BookSegment.find({
-        bookId: bookObjectId,
-        $text: { $search: searchText },
-      })
-        .select('_id bookId content segmentIndex pageNumber wordCount')
-        .sort({ score: { $meta: 'textScore' } })
-        .limit(maxResults)
-        .lean<SegmentHit[]>();
-    } catch {
-      // Text index may not exist: fall through to regex fallback
-      segments = [];
-    }
-
-    // Fallback: regex search matching ANY keyword
-    if (segments.length === 0) {
-      const keywords = searchText.split(/\s+/).filter((k) => k.length > 2);
-
-      // An empty pattern would match every segment, so stop here instead
-      if (keywords.length === 0) {
-        return { success: true, data: [] };
-      }
-
-      const pattern = keywords.map(escapeRegex).join('|');
-
-      segments = await BookSegment.find({
-        bookId: bookObjectId,
-        content: { $regex: pattern, $options: 'i' },
-      })
-        .select('_id bookId content segmentIndex pageNumber wordCount')
-        .sort({ segmentIndex: 1 })
-        .limit(maxResults)
-        .lean<SegmentHit[]>();
-    }
-
-    if (process.env.NODE_ENV === 'development') {
-      console.warn(`Search complete. Found ${segments.length} results`);
-    }
-
-    return {
-      success: true,
-      data: serializeData(segments),
-    };
-  } catch (error) {
-    console.error('Error searching segments:', error);
-
-    return {
-      success: false,
-      error: 'Search failed.',
-      data: [],
-    };
   }
 };

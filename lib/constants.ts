@@ -91,14 +91,10 @@ export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 export const ACCEPTED_PDF_TYPES = ['application/pdf'];
 export const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 // 'image/jpg' is not a real MIME type; browsers report JPEG files as 'image/jpeg'
-export const ACCEPTED_IMAGE_TYPES = [
-  'image/jpeg',
-  // 'image/jpg',
-  'image/png',
-  'image/webp',
-];
+export const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
-// Pre-configured VAPI assistant ID (hardcoded for this app)
+// Vapi assistant ID, read from NEXT_PUBLIC_ASSISTANT_ID.
+// The ID is not a secret: it is sent to the browser to start a call.
 export const ASSISTANT_ID = process.env.NEXT_PUBLIC_ASSISTANT_ID!;
 
 // 11Labs Voice IDs - Optimized for conversational AI
@@ -139,8 +135,6 @@ export const voiceCategories = {
   female: ['rachel', 'sarah'],
 };
 
-// Default voice
-// export const DEFAULT_VOICE = 'rachel';
 // Default voice (the compiler checks that it is a real key of voiceOptions)
 export const DEFAULT_VOICE = 'rachel' satisfies keyof typeof voiceOptions;
 

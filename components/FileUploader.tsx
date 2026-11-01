@@ -1,7 +1,7 @@
 'use client';
 
 import { X } from 'lucide-react';
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import type { FieldValues } from 'react-hook-form';
 import { useController } from 'react-hook-form';
 
@@ -31,6 +31,14 @@ const FileUploader = <T extends FieldValues>({
 
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // When the form value is cleared from outside (form.reset(), or the remove
+  // button), clear the hidden input too, so the same file can be picked again
+  useEffect(() => {
+    if (!value && inputRef.current) {
+      inputRef.current.value = '';
+    }
+  }, [value]);
+
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -45,9 +53,6 @@ const FileUploader = <T extends FieldValues>({
     (e: React.MouseEvent) => {
       e.stopPropagation();
       onChange(null);
-      if (inputRef.current) {
-        inputRef.current.value = '';
-      }
     },
     [onChange]
   );

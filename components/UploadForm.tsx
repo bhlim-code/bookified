@@ -4,8 +4,9 @@ import { useAuth } from '@clerk/nextjs';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { upload } from '@vercel/blob/client';
 import { Upload, ImageIcon } from 'lucide-react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 
@@ -21,6 +22,7 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import UpgradeDialog from '@/components/UpgradeDialog';
 import VoiceSelector from '@/components/VoiceSelector';
 
 import {
@@ -41,7 +43,12 @@ const emptySubscribe = () => () => {};
 const UploadForm = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // Plan limit message: when set, the upgrade dialog is open
+  const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
+  // Stays true after the dialog is dismissed, so the upgrade path stays visible
   const [isBillingError, setIsBillingError] = useState(false);
+  // Slug of the book that already exists with the same title, if any
+  const [existingSlug, setExistingSlug] = useState<string | null>(null);
   // false during server render and hydration, true once mounted on the client
   const isMounted = useSyncExternalStore(
     emptySubscribe,
@@ -62,6 +69,40 @@ const UploadForm = () => {
     },
   });
 
+  // With cacheComponents the page state is preserved when the user leaves, so
+  // reset the form and clear stale errors on leave (effect cleanups still run
+  // when the page is hidden)
+  useEffect(() => {
+    return () => {
+      form.reset();
+      setFormError(null);
+      setUpgradeMessage(null);
+      setIsBillingError(false);
+      setExistingSlug(null);
+    };
+  }, [form]);
+
+  // Shows an error on the page and keeps the form as it is
+  const showError = (message: string) => {
+    setFormError(message);
+    toast.error(message);
+  };
+
+  // Plan limit reached: open the upgrade dialog and keep a notice on the page
+  const showUpgrade = (message: string) => {
+    setUpgradeMessage(message);
+    setIsBillingError(true);
+  };
+
+  // Keeps the form as it is, so the user can change the title or open the
+  // existing book
+  const showDuplicate = (slug: string) => {
+    const msg = 'A book with a similar title already exists.';
+    setFormError(msg);
+    setExistingSlug(slug);
+    toast.info(msg);
+  };
+
   const onSubmit = async (data: BookUploadFormValues) => {
     if (!userId) {
       toast.error('Please login to upload books');
@@ -70,7 +111,9 @@ const UploadForm = () => {
 
     setIsSubmitting(true);
     setFormError(null);
+    setUpgradeMessage(null);
     setIsBillingError(false);
+    setExistingSlug(null);
 
     // What this upload has created so far, so a failure can undo exactly that
     const uploadedUrls: string[] = [];
@@ -99,23 +142,20 @@ const UploadForm = () => {
       const eligibility = await checkUploadEligibility(data.title);
 
       if (!eligibility.success) {
-        const errorMsg = eligibility.error || 'Upload check failed.';
-        setFormError(errorMsg);
-        toast.error(errorMsg);
-
+        const message = eligibility.error || 'Upload check failed.';
         if (eligibility.isBillingError) {
-          setIsBillingError(true);
+          showUpgrade(message);
+        } else {
+          showError(message);
         }
         return;
       }
 
-      // Only redirect if the book is complete. A book with 0 segments is the
+      // Only block if the book is complete. A book with 0 segments is the
       // leftover of a failed upload, so let the flow below finish it.
       if (eligibility.exists && eligibility.book) {
         if (eligibility.book.totalSegments > 0) {
-          toast.info('Book with same title already exists.');
-          form.reset();
-          router.push(`/books/${eligibility.book.slug}`);
+          showDuplicate(eligibility.book.slug);
           return;
         }
 
@@ -124,13 +164,11 @@ const UploadForm = () => {
         await deleteIncompleteUpload(String(eligibility.book._id));
       }
 
-      // Safe blob name: no slashes or special characters; fallback for titles
-      // with no Latin letters (the slug would otherwise be empty)
       const pdfFile = data.pdfFile;
       const parsedPDF = await parsePDFFile(pdfFile);
 
       if (parsedPDF.content.length === 0) {
-        toast.error(
+        showError(
           'Failed to parse PDF. Please try again with a different file.'
         );
         return;
@@ -183,6 +221,7 @@ const UploadForm = () => {
             contentType: 'image/png',
           }
         );
+        uploadedUrls.push(uploadedCoverBlob.url);
         coverUrl = uploadedCoverBlob.url;
         coverBlobKey = uploadedCoverBlob.pathname;
       }
@@ -202,33 +241,32 @@ const UploadForm = () => {
 
       // Checking data too narrows its type for everything below
       if (!book.success || !book.data) {
-        const errorMsg = book.error || 'Failed to create book';
-        setFormError(errorMsg);
-        toast.error(errorMsg);
+        // The files uploaded above are not attached to any book: remove them
+        await rollback();
+        const message = book.error || 'Failed to create book';
         if (book.isBillingError) {
-          setIsBillingError(true);
+          showUpgrade(message);
+        } else {
+          showError(message);
         }
         return;
       }
 
-      // Existing and complete: go to it. Existing with 0 segments: fall through
-      // and save the segments now (saveBookSegments clears any leftovers first).
+      // The book already exists (for example two uploads of one title ran at
+      // the same time)
       if (book.alreadyExists) {
         // The book appeared in the meantime, so the files uploaded above are
         // not attached to anything: remove them
         await rollback();
 
         if (book.data.totalSegments > 0) {
-          toast.info('Book with same title already exists.');
-          form.reset();
-          router.push(`/books/${book.data.slug}`);
+          showDuplicate(book.data.slug);
           return;
         }
 
-        const errorMsg =
-          'This book is still being processed. Please try again in a moment.';
-        setFormError(errorMsg);
-        toast.error(errorMsg);
+        showError(
+          'This book is still being processed. Please try again in a moment.'
+        );
         return;
       }
 
@@ -243,12 +281,9 @@ const UploadForm = () => {
       );
 
       if (!segments.success) {
-        // TODO: delete the book created above (and its blobs) here, so a retry
-        // doesn't find an existing book that has no segments.
+        // Removes the book created above, its segments and its files
         await rollback();
-        const errorMsg = 'Failed to save book segments. Upload rolled back.';
-        setFormError(errorMsg);
-        toast.error(errorMsg);
+        showError('Failed to save book segments. Upload rolled back.');
         return;
       }
 
@@ -258,9 +293,7 @@ const UploadForm = () => {
       // Any unexpected failure (network, upload, server action): undo, then report
       console.error(error);
       await rollback();
-      const errorMsg = 'Failed to upload book. Please try again later.';
-      setFormError(errorMsg);
-      toast.error(errorMsg);
+      showError('Failed to upload book. Please try again later.');
     } finally {
       setIsSubmitting(false);
     }
@@ -271,6 +304,12 @@ const UploadForm = () => {
   return (
     <>
       {isSubmitting && <LoadingOverlay />}
+
+      {/* UPGRADE DIALOG: shown when the plan's book limit is reached */}
+      <UpgradeDialog
+        message={upgradeMessage}
+        onClose={() => setUpgradeMessage(null)}
+      />
 
       <div className='new-book-wrapper'>
         <Form {...form}>
@@ -360,21 +399,37 @@ const UploadForm = () => {
               )}
             />
 
-            {/* INLINE ERROR BANNER WITH ACTION BUTTON */}
+            {/* INLINE ERROR BANNER */}
             {formError && (
               <div className='space-y-2 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-600'>
                 <p>{formError}</p>
-                {isBillingError && (
-                  <Button
-                    type='button'
-                    variant='outline'
-                    size='sm'
-                    className='border-red-300 text-red-700 hover:bg-red-100'
-                    onClick={() => router.push('/subscriptions')}
-                  >
-                    Go to Subscriptions & Upgrade
-                  </Button>
+                {existingSlug && (
+                  <p>
+                    <Link
+                      href={`/books/${existingSlug}`}
+                      className='font-medium underline'
+                    >
+                      View existing book
+                    </Link>{' '}
+                    or change the title and try again.
+                  </p>
                 )}
+              </div>
+            )}
+
+            {/* PLAN LIMIT NOTICE: stays visible after the dialog is dismissed */}
+            {isBillingError && (
+              <div className='space-y-2 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-600'>
+                <p>You have reached your plan&apos;s book limit.</p>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  className='border-red-300 text-red-700 hover:bg-red-100'
+                  onClick={() => router.push('/subscriptions')}
+                >
+                  Upgrade
+                </Button>
               </div>
             )}
 
